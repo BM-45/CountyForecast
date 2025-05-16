@@ -1,0 +1,623 @@
+---
+title: "Final Project"
+output: html_document
+date: "2025-04-15"
+Author: Bhanu Mallik Tallapragada
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1 Data Preparation
+
+## 1.1 SAIPE data
+
+Q1. Give some basic information: The name, abbreviation, and FIPS code for your state.
+```{r}
+#Give some basic information: The name, abbreviation, and FIPS code for your state.
+# Name of state selected is South Carolina.
+# Abbreviation is SC.
+# FIPS code is 45.
+state_fips_code = 45
+state_abbr = 'SC'
+
+```
+
+Data cleaning.
+```{r}
+#### SAIPE Data.
+
+
+library(fpp3)
+library(tidyverse)
+saipe <- read.csv("E:\\Downloads\\SAIPE_04-15-2025.csv" )
+saipe_sc <- saipe |>
+  filter( ID != 0, ID != state_fips_code*1000) |>
+  mutate(Poverty.Universe = as.integer(gsub(",","",Poverty.Universe)), Number.in.Poverty = as.integer(gsub(",","",Number.in.Poverty))) |>
+           rename(fips = ID, county_population = Poverty.Universe, poverty_number = Number.in.Poverty, county_name = Name) |>
+  select(Year, fips, county_name, county_population, poverty_number)
+
+head(saipe_sc)
+```
+Q2. Find the total number of counties, the largest county, and list the nine largest counties (by current population).
+```{r}
+
+# Total number of counties
+total_counties <- saipe_sc |> distinct(fips) |> nrow()
+total_counties
+
+# Nine largest counties by (most recent) population
+latest_year    <- max(saipe_sc$Year)
+nine_largest_counties <- saipe_sc |>
+  filter(Year == latest_year) |>
+  arrange(desc(county_population)) |>
+  slice(1:9) |>
+  select(fips, county_name) 
+
+largest_counties <- nine_largest_counties |> pull(fips)
+counties <- nine_largest_counties |> pull(county_name)
+
+```
+Q3. Make a map of your state with each county colored by its current population. I recommend the usmap package for this.
+```{r}
+
+library(usmap)
+library(ggplot2)
+
+
+plot_usmap(regions = "counties", include = state_abbr,
+           data    = saipe_sc |> filter(Year == max(Year)), values = "county_population") +
+  scale_fill_continuous(name = "Population")
+
+```
+Q4. Make a time plot showing the number in poverty for each of the nine largest counties. (You can make one plot and facet it.)
+
+```{r}
+saipe_sc |>
+  filter(fips %in% largest_counties) |>
+  ggplot(aes(Year, poverty_number)) +
+    geom_line() +
+    facet_wrap(~ county_name, scales = "free_y") +
+    labs(title = "People in Poverty Over Time",
+         y     = "Number in Poverty")
+
+
+```
+## 1.2 County SNAP Benefits
+
+Data cleaning
+```{r}
+### SNAP Data.
+
+
+county_data <- read.csv("E:\\Downloads\\cntysnap (1).csv", skip = 5)
+
+# Changing columns to number and deselecting from the dataframe.
+south_carolina_counties <- county_data |> filter(State.FIPS.code == state_fips_code , County.FIPS.code != 0) |> 
+  mutate(FIPS.code = paste(sprintf("%02d", as.integer(State.FIPS.code)),sprintf("%03d", as.integer(County.FIPS.code)), sep = "")) |> select(-State.FIPS.code, -County.FIPS.code)
+
+# Using pivot to reduce the columns.
+counties_data_sc <- south_carolina_counties |> pivot_longer(
+    cols      = matches("^Jul\\."),
+    names_to  = "month_year",
+    values_to = "snap_recipients"
+  ) |>
+  mutate(
+    Year = parse_number(substring(month_year,5)),
+    snap_recipients = parse_number(snap_recipients),
+    FIPS.code = parse_number(FIPS.code)
+  ) |>
+  rename(county_name = Name, fips = FIPS.code) |>
+  select(Year, fips, snap_recipients, county_name)
+```
+
+Q1. Make a time plot showing the number receiving SNAP benefits for each of the nine largest counties.
+```{r}
+counties_data_sc |> as_tsibble(index = Year, key =  fips) |>
+  filter(fips %in% largest_counties) |>
+  autoplot() +
+  facet_wrap(~ county_name)
+
+# De-selecting the column.
+counties_data_sc <- counties_data_sc |> select(-county_name)
+  
+```
+
+## 1.3 State IRS Data
+
+Data cleaning.
+```{r}
+### IRS Data.
+
+
+irs_data <- read.csv("E:\\Downloads\\irs (1).csv", skip = 5)
+ 
+
+irs_data_sc <- irs_data |> filter(State.FIPS.code == state_fips_code) |> mutate(Poor.exemptions = as.integer(gsub(",","",Poor.exemptions))) |> rename(poor_exemptions = Poor.exemptions) |>  select( Year, poor_exemptions)
+
+```
+
+Q1. Make a time plot showing the number of poor exemptions filed in your state.
+```{r}
+# Plot.
+irs_data_sc |> as_tsibble(index = Year) |> autoplot()
+```
+
+
+## 1.4 Merging the data
+
+Merging the data from different tables saipe, snap, irs.
+```{r}
+# Merge data.
+
+merged_data <- saipe_sc |>
+  left_join(counties_data_sc, by = c('Year', 'fips')) |>
+  left_join(irs_data_sc, by = 'Year')
+
+# Check number of rows per county
+rows_per_county <- merged_data |>
+  group_by(fips) |>
+  summarise(n_rows = n(), .groups = 'drop')
+
+# Check if all counties have the same number of rows
+unique(rows_per_county$n_rows)
+
+# after 1998 through 2022. consider only through this interval.
+data <- merged_data |>
+  filter(Year >= 1998, Year < 2023 ) |>
+  as_tsibble(index = Year, key = c(fips, county_name))
+
+# Check for NA's
+summary(is.na(data))
+
+
+nrow(data)
+```
+Q1. Make some visualizations (your choice) to explore the relationship between the number in poverty and the three input variables.
+```{r}
+# Poverty vs Population
+data |>
+  ggplot(aes(x = county_population, y = poverty_number)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "Poverty vs Population by County-Year",
+       x = "Population", y = "Number in Poverty")
+
+# Poverty vs SNAP
+data |>
+  ggplot(aes(x = snap_recipients, y = poverty_number)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "Poverty vs SNAP Recipients by County-Year",
+       x = "SNAP Recipients", y = "Number in Poverty")
+
+# Poverty vs Poor Exemptions
+data |>
+  ggplot(aes(x = poor_exemptions, y = poverty_number)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "Poverty vs Poor Exemptions by County-Year",
+       x = "Poor Exemptions", y = "Number in Poverty")
+
+# Poverty Rate Over Time (Percentage of Population)
+data |>
+  mutate(poverty_rate = poverty_number/county_population) |>
+  filter(fips %in% largest_counties) |>
+  ggplot(aes(x = Year, y = poverty_rate, color = county_name)) +
+  geom_line() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Poverty Rate Trends for Nine Largest Counties",
+       x = "Year", y = "Poverty Rate") +
+  facet_wrap(~ county_name)
+
+
+# Heatmap of Poverty Rates by County
+data |>
+  mutate(poverty_rate = poverty_number/county_population,
+         county = fct_reorder(county_name, poverty_rate)) |>
+  ggplot(aes(x = Year, y = county, fill = poverty_rate)) +
+  geom_tile() +
+  scale_fill_viridis_c(labels = scales::percent) +
+  labs(title = "Poverty Rate Heatmap by County",
+       x = "Year", y = "County", fill = "Poverty Rate")
+
+
+
+
+
+```
+Since census bureau argues that all of our variables should be logged.
+Applying log transformation to all the variables.
+```{r}
+# Apply log transformations as per SAIPE methodology
+data_log <- data |>
+mutate(
+log_poverty = log(poverty_number + 1),
+log_pop = log(county_population),
+log_snap = log(snap_recipients + 1),
+log_irs = log(poor_exemptions + 1)
+)
+
+```
+
+# 2. Linear Models
+
+## 2.1 Variable selection
+creating all the 7 different models with combination of input variables(population, snap, irs).
+```{r}
+
+## Define all 7 possible models
+models <- data |>
+model(
+mod1 = TSLM(log(poverty_number + 1) ~ log(county_population)),
+mod2 = TSLM(log(poverty_number + 1) ~ log(snap_recipients + 1)),
+mod3 = TSLM(log(poverty_number + 1) ~ log(poor_exemptions + 1)),
+mod4 = TSLM(log(poverty_number + 1) ~ log(county_population) + log(snap_recipients + 1)),
+mod5 = TSLM(log(poverty_number + 1) ~ log(county_population) + log(poor_exemptions + 1)),
+mod6 = TSLM(log(poverty_number + 1) ~ log(snap_recipients + 1) + log(poor_exemptions + 1)),
+mod7 = TSLM(log(poverty_number + 1) ~ log(county_population) + log(snap_recipients + 1) + log(poor_exemptions + 1))
+)
+
+```
+
+Q1. Which of the three input variables did the best model include?
+```{r}
+# Compare models
+# adj_r_squared, CV, AIC, AICc, BIC these parameter can be used to compare.
+model_metrics <- models |>
+  glance() |>
+  group_by(.model) |>
+  summarise(
+    mean_AICc = mean(AICc, na.rm = TRUE),
+    mean_adj_r2 = mean(adj_r_squared, na.rm = TRUE)
+  ) |>
+  arrange(mean_AICc)
+model_metrics
+# model did best when it considers population and snap variables are only considered.
+# mod4.
+
+```
+Model Mod4 - considering variables only population and snap is the best model.
+
+
+
+Q2. For each of the nine biggest counties, make a plot showing the actual number in poverty as well as the predictions made by your best linear model. (You can use facet_wrap to make all nine at once).
+```{r}
+# Plot actual vs predicted for largest counties
+
+models |> 
+  select(mod4) |> 
+  augment() |> 
+  rename(.pred = .fitted) |>
+  filter(fips %in% largest_counties) |>
+  ggplot(aes(x = Year)) +
+  geom_line(aes(y = poverty_number, colour = "Actual")) +
+  geom_line(aes(y = .pred, colour = "Predicted")) +
+  scale_color_manual(values = c("Actual" = "black", "Predicted" = "red")) +
+  labs(title = "Actual vs Predicted Poverty",
+       y = "Poverty Count", color = "Series") +
+  facet_wrap(~ county_name, scales = "free_y") +
+  theme(legend.position = "bottom")
+
+```
+
+
+## 2.2 Residual Analysis
+
+Q1. Make a time plot of the innovation residuals (since we took logs) for the nine biggest counties.
+```{r}
+
+models |>
+  select(mod4) |>
+  augment() |>
+  filter( fips %in% largest_counties) |>
+  select(fips, county_name, Year, .innov) |>
+  autoplot(.innov) +
+  facet_wrap(~ county_name) + 
+  labs(title = "Time plot of residuals",
+        x = "Year", y = "Residual") + 
+  theme_minimal()
+
+```
+
+Q2. Run the Ljung-Box test on every county’s innovation residuals. How many counties residuals are significantly different from white noise?
+```{r}
+## Ljung-Box test for all counties
+
+ljung_results <- models |> 
+  select(mod4) |>
+  augment() |>
+  as_tsibble(key = c(fips, county_name), index = Year) |>
+  group_by_key() |> 
+  features(.innov, ljung_box, lag = 10)
+
+
+num_significant <- sum(ljung_results$lb_pvalue > 0.05, na.rm = TRUE)
+num_significant
+# 33 is the no of counties with having residuals white noise.
+# 13 counties are having residuals which are not white noise.
+```
+The Ljung-Box test p-value changes as the lag parameter is varied, which is expected because the test checks for autocorrelation up to that lag. For most counties, the p-value remains above 0.05 for reasonable lag values (e.g., 5 to 15), suggesting that the model residuals are white noise. In a few counties, the p-value drops below 0.05 at higher lags, indicating possible longer-term autocorrelation that the linear model does not capture.
+
+ACF plots for nine largest counties.
+```{r}
+#models |> 
+#  select(mod4) |>
+#  augment() |>
+#  filter(fips %in% largest_counties) |>
+#  as_tsibble(key = c(fips, county_name), index = Year) |> 
+#  group_by_key() |> 
+#  ACF(.innov, lag_max = 30) |>
+#  ggplot(aes(x = lag, y = acf)) +
+#  geom_col(fill = "#3182bd") +
+#  geom_hline(yintercept = 0) +
+#  facet_wrap(~ county_name, scales = "free_y") +
+#  labs(title = "ACF of Residuals by County",
+#       x = "Lag", y = "Autocorrelation") +
+#  theme_minimal()
+```
+
+Q3. Do you think the linear model does a good job of predicting the number in poverty?
+
+
+
+### Model Adequacy Assessment
+
+### For most counties:
+The actual vs. predicted plots show that the model’s predictions closely follow the observed poverty counts. Additionally, the Ljung-Box test p-values are greater than 0.05 for the majority of counties, indicating that the residuals are approximately white noise. This means the model has captured the main patterns and there is no significant autocorrelation left in the errors, which is a sign of a good model fit.
+
+### For some counties:
+There are counties where the Ljung-Box test p-values are less than 0.05. This indicates that the model’s residuals are still autocorrelated, meaning the linear model has not fully captured all the time series structure in those counties. As a result, the predictions for these counties may be less reliable.
+
+
+
+# 3.  Stochastic models
+
+## 3.1 Single county forecasts
+
+Q1. For each model, plot the number in poverty data along with a five-year forecast. (Again, you
+can do this easily with facets.)
+
+```{r}
+
+# Select the largest county (by population or poverty_number in latest year)
+largest_county_fips <- data |>
+  filter(Year == max(Year)) |>
+  arrange(desc(county_population)) |>
+  slice(1) |>
+  pull(fips)
+
+largest_county_data <- data |>
+  filter(fips == largest_county_fips) |>
+  select(Year, poverty_number) |>
+  mutate(log_poverty = log(poverty_number + 1)) |>
+  as_tsibble(index = Year)
+
+# Fit stochastic models
+county_models <- largest_county_data |>
+  model(
+    NAIVE      = NAIVE(log_poverty),
+    MEAN       = MEAN(log_poverty),
+    SES        = ETS(log_poverty ~ error("A") + trend("N") + season("N")),
+    Holt       = ETS(log_poverty ~ error("A") + trend("A") + season("N")),
+    Holt_damped= ETS(log_poverty ~ error("A") + trend("Ad") + season("N")),
+    ARIMA      = ARIMA(log_poverty)
+  )
+
+# Forecast 5 years ahead
+county_fc <- county_models |> forecast(h = 5)
+
+# Plot actual and forecasts (facet by model)
+autoplot(largest_county_data, log_poverty) +
+  autolayer(county_fc, level = NULL) +
+  facet_wrap(~ .model, scales = "free_y") +
+  labs(title = "Largest County: Log(Poverty) Forecasts", y = "log(Poverty)")
+
+
+
+
+```
+
+
+
+Q2. Use some measure of model quality to decide which of these models is the best for this county
+```{r}
+
+# For accuracy metrics (RMSE, MAE, etc.)
+county_models |> accuracy() |> select(.model, RMSE, MAE)
+
+# For information criteria (AICc, BIC, etc.)
+county_models |> glance() |> select(.model, AICc, BIC)
+
+```
+The Holt_damped model produced the lowest RMSE and MAE, indicating it provides the most accurate forecasts for this county. However, the ARIMA model achieved much lower AICc and BIC values, suggesting it provides a better overall fit to the data. Since the forecast accuracy of ARIMA is very close to Holt_damped, but its information criteria are much better, ARIMA is the preferred model for this county.
+
+
+
+## 3.2 Exponential smoothing models
+
+Q1. Which exponential smoothing model did you select and why?
+
+```{r}
+# Fit ETS models to all counties
+ets_models <- data |>
+  mutate(log_poverty = log(poverty_number + 1)) |>
+  model(
+    SES        = ETS(log_poverty ~ error("A") + trend("N") + season("N")),
+    Holt       = ETS(log_poverty ~ error("A") + trend("A") + season("N")),
+    Holt_damped= ETS(log_poverty ~ error("A") + trend("Ad") + season("N"))
+  )
+
+# Summarize accuracy across counties
+ets_accuracy <- ets_models |> accuracy()
+ets_accuracy |> group_by(.model) |> summarise(mean_RMSE = mean(RMSE, na.rm = TRUE))
+
+```
+I selected the Holt_damped exponential smoothing method because it achieved the lowest mean RMSE, indicating it provides the most accurate forecasts among the exponential smoothing models tested.
+
+## 3.3 ARIMA models
+
+Q1. Which ARIMA model did you select and why?
+```{r}
+
+# Fit auto ARIMA to all counties
+arima_models <- data |>
+  mutate(log_poverty = log(poverty_number + 1)) |>
+  model(
+    auto_arima = ARIMA(log_poverty)
+  )
+
+# arima_models |> glance()
+
+# arima_models |> glance() |> names()
+
+# What ARIMA orders are most common?
+arima_models |> glance() |> count(.model)
+
+
+#  if you want to count the unique model specifications
+arima_models |> tidy() |> count(term)
+
+
+# (Optional) Fit the most common ARIMA model explicitly if desired
+# arima_models_explicit <- data |>
+#   model(ARIMA(log_poverty ~ pdq(p, d, q)))
+
+# Replace p, d, q with the actual orders you found
+common_arima_models <- data |>
+  mutate(log_poverty = log(poverty_number + 1)) |>
+  model(
+    ARIMA_100 = ARIMA(log_poverty ~ pdq(1,0,0)),
+    ARIMA_200 = ARIMA(log_poverty ~ pdq(2,0,0)),
+    ARIMA_110 = ARIMA(log_poverty ~ pdq(1,1,0))
+  )
+
+# Calculate accuracy metrics
+arima_accuracy <- common_arima_models |>
+  accuracy()
+
+# Summarize (e.g., mean RMSE across all counties for each model)
+arima_accuracy |>
+  group_by(.model) |>
+  summarise(mean_RMSE = mean(RMSE, na.rm = TRUE),
+            mean_MAE = mean(MAE, na.rm = TRUE)) |>
+  arrange(mean_RMSE)
+
+
+```
+ selected the ARIMA(2,0,0) model because it had the lowest mean RMSE and mean MAE across all counties, indicating that it provides the most accurate forecasts statewide among the most commonly selected ARIMA models
+
+
+## 3.4 Cross validation
+
+Q1. Which model performed the best on cross validation?
+```{r}
+
+# Rolling origin cross-validation: 5-year forecast, min 15 years training
+library(slider)
+
+# Create rolling origin resamples
+data1 <- data |> mutate(log_poverty = log(poverty_number + 1))
+cv_splits <- data1 |>
+  stretch_tsibble(.init = 15, .step = 1)
+
+# Fit ETS and ARIMA to each split
+cv_models <- cv_splits |>
+  model(
+    ETS   = ETS(log_poverty ~ error("A") + trend("Ad") + season("N")),
+    ARIMA = ARIMA(log_poverty)
+  )
+
+# Forecast 5 years ahead
+cv_fc <- cv_models |> forecast(h = 5)
+
+
+# Compute RMSE for each model and county
+data <- data %>% mutate(log_poverty = log(poverty_number + 1))
+cv_acc <- cv_fc |> accuracy(data)
+
+# Summarize overall RMSE
+cv_acc |> group_by(.model) |> summarise(mean_RMSE = mean(RMSE, na.rm = TRUE))
+
+```
+The ARIMA model is preferred because it has a lower mean RMSE than the ETS model, indicating better forecast accuracy across the series. This approach follows best practices in time series forecasting, where the model with the lowest out-of-sample error is selected as the best performer.
+
+
+When to prefer ETS: If your data had strong, regular seasonality and trend, and ETS performed better, you would choose ETS. However, your results show ARIMA is superior for your data.
+
+# 4. Forecasts
+
+
+Q1. Which five counties (by name) do you predict will have the highest percentage increase in
+poverty over the next five years?
+
+```{r}
+
+# 1. Prepare data (assuming your data is a tsibble with fips, Year, poverty_number, county_population, county_name)
+data <- data |>
+  mutate(log_poverty = log(poverty_number + 1))
+
+# 2. Fit the winning model (ARIMA(2,0,0) as example) and forecast 5 years ahead
+final_models <- data |>
+  model(ARIMA = ARIMA(log_poverty ~ pdq(2,0,0)))
+
+future_fc <- final_models |>
+  forecast(h = 5) |>
+  as_tibble()
+
+# 3. Back-transform to original scale and get forecast for last year (5 years ahead)
+future_fc <- future_fc |>
+  mutate(forecast_poverty = exp(.mean) - 1)
+
+# 4. Get the most recent actual poverty count and population for each county
+latest_actuals <- data |>
+  group_by(fips) |>
+  filter(Year == max(Year)) |>
+  ungroup() |>
+  select(fips, county_name, poverty_number, county_population)
+
+# 5. For each county, get the 5-year-ahead forecast
+fc_5yr <- future_fc |>
+  group_by(fips) |>
+  filter(Year == max(Year)) |>   # This is the last forecasted year (5 years ahead)
+  ungroup() |>
+  select(fips, forecast_poverty)
+
+# 6. Join actuals and forecast, calculate predicted increase and percentage
+county_results <- latest_actuals |>
+  left_join(fc_5yr, by = "fips") |>
+  mutate(
+    abs_increase = forecast_poverty - poverty_number,
+    pct_increase = 100 * abs_increase / county_population
+  )
+
+# 7. Identify top 5 counties by percentage increase
+top5 <- county_results |>
+  arrange(desc(pct_increase)) |>
+  slice(1:5) |>
+  select(county_name, pct_increase)
+
+# Top 5 counties by predicted percentage increase in poverty
+top5
+
+
+```
+
+Q2. Map the forecast poverty increase.
+```{r}
+# 9. Plot the map
+plot_usmap(
+  regions = "counties",
+  data = county_results,
+  include = state_abbr,
+  values = "pct_increase"
+) +
+  scale_fill_continuous(
+    low = "white", high = "red",
+    name = "Predicted % Increase\nin Poverty (5 yrs)",
+    label = scales::comma
+  ) +
+  labs(
+    title = "Predicted 5-Year Percentage Increase in Poverty by County",
+    subtitle = "Based on ARIMA(2,0,0) forecasts"
+  ) +
+  theme(legend.position = "right")
+```
